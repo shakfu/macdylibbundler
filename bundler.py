@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import re
 import sys
 import shutil
 import subprocess
@@ -170,10 +171,52 @@ class Dependency:
         return path.startswith("@rpath") or path.startswith("@loader_path")
 
     def _search_filename_in_rpaths(self, rpath_file: str, dependent_file: str) -> str:
-        # Implementation of rpath resolution
-        # This is a simplified version - the full implementation would need to handle
-        # all the rpath resolution logic from the C++ code
-        return rpath_file  # Placeholder
+        fullpath = ""
+        suffix = re.sub(r"^@[a-z_]+path/", "", rpath_file)
+
+        def check_path(path: str):
+            file_prefix = dependent_file[0:dependent_file.rfind('/') + 1]
+            if dependent_file != rpath_file:
+                path_to_check = ""
+                if "@loader_path" in path:
+                    path_to_check = re.sub(r"@loader_path/", file_prefix, path)
+                elif "@rpath" in path:
+                    path_to_check = re.sub(r"@rpath/", file_prefix, path)
+
+                fullpath = os.path.abspath(path_to_check)
+                self.rpath_to_fullpath[rpath_file] = fullpath
+                return True
+            return False
+
+        if rpath_file in self.rpath_to_fullpath:
+            fullpath = self.rpath_to_fullpath[rpath_file]
+
+        elif not check_path(rpath_file):
+            for rpath in self.rpaths_per_file[dependent_file]:
+                if not rpath.endswith('/'):
+                    rpath += "/"
+                if check_path(rpath + suffix):
+                    break
+
+            if rpath_file in self.rpath_to_fullpath:
+                fullpath = self.rpath_to_fullpath[rpath_file]
+
+        if not fullpath:
+            search_path_amount = self.settings.search_path_amount
+            for n in range(search_path_amount):
+                search_path = self.settings.search_path(n)
+                if os.path.exists(search_path + suffix):
+                    fullpath = search_path + suffix
+                    break
+
+            if not fullpath:
+                print(f"WARNING : can't get path for '{rpath_file}'")
+                fullpath = self._get_user_input_dir_for_file(suffix) + suffix
+                fullpath = os.path.abspath(fullpath)
+
+        return fullpath
+
+
 
     def _init_search_paths(self) -> None:
         # Initialize search paths from environment variables
@@ -194,10 +237,40 @@ class Dependency:
             self.settings.add_search_path(path)
 
     def _get_user_input_dir_for_file(self, filename: str) -> str:
-        # Implementation of user input for missing libraries
-        # This is a simplified version - the full implementation would need to handle
-        # all the user interaction logic from the C++ code
-        return os.getcwd()  # Placeholder
+        search_path_amount = self.settings.search_path_amount
+        for n in range(search_path_amount):
+            search_path = self.settings.search_path(n)
+            if search_path and not search_path.endswith('/'):
+                search_path += "/"
+
+            if os.path.exists(search_path + filename):
+                print(f"{search_path + filename} was found. DYLIBBUNDLER MAY NOT CORRECTLY "
+                             "HANDLE THIS DEPENDENCY: Manually check the "
+                             "executable with 'otool -L'")
+                return search_path
+
+        while True:
+            sys.stdout.flush()
+
+            prefix = input("Please specify the directory where this library is "
+                           "located (or enter 'quit' to abort): ")
+
+            if prefix == "quit":
+                sys.exit(1)
+
+            if prefix and not prefix.endswith('/'):
+                prefix += "/"
+
+            if not os.path.exists(prefix + filename):
+                print(f"{prefix + filename} does not exist. Try again")
+                continue
+
+            else:
+                print(f"{prefix + filename} was found. DYLIBBUNDLER MAY NOT CORRECTLY "
+                             "HANDLE THIS DEPENDENCY: Manually check the "
+                             "executable with 'otool -L'")
+                self.settings.add_search_path(prefix)
+                return prefix
 
     def get_original_filename(self) -> str:
         return self.filename
@@ -243,9 +316,7 @@ class Dependency:
         for symlink in self.symlinks:
             self._change_install_name(file_to_fix, symlink, self.get_inner_path())
 
-    def _change_install_name(
-        self, binary_file: str, old_name: str, new_name: str
-    ) -> None:
+    def _change_install_name(self, binary_file: str, old_name: str, new_name: str) -> None:
         command = f'install_name_tool -change "{old_name}" "{new_name}" "{binary_file}"'
         if subprocess.call(command, shell=True) != 0:
             print(
@@ -548,80 +619,147 @@ class DylibBunder:
                 if is_arm:
                     sys.exit(1)
 
-    def show_help(self):
-        print("dylibbundler 1.0.5")
-        print(
-            "dylibbundler is a utility that helps bundle dynamic libraries inside macOS app bundles."
-        )
-        print("-x, --fix-file <file to fix (executable or app plug-in)>")
-        print("-b, --bundle-deps")
-        print("-d, --dest-dir <directory to send bundled libraries (relative to cwd)>")
-        print(
-            "-p, --install-path <'inner' path of bundled libraries (usually relative to executable, by default '@executable_path/../libs/')>"
-        )
-        print("-s, --search-path <directory to add to list of locations searched>")
-        print("-of, --overwrite-files (allow overwriting files in output directory)")
-        print(
-            "-od, --overwrite-dir (totally overwrite output directory if it already exists. implies --create-dir)"
-        )
-        print("-cd, --create-dir (creates output directory if necessary)")
-        print("-ns, --no-codesign (disables ad-hoc codesigning)")
-        print("-i, --ignore <location to ignore> (will ignore libraries in this directory)")
-        print("-h, --help")
+    @classmethod
+    def commandline(cls):
+        settings = Settings()
 
-    def process(self):
-        # Parse command line arguments
-        i = 1
-        while i < len(sys.argv):
-            arg = sys.argv[i]
-            if arg in ["-x", "--fix-file"]:
-                i += 1
-                self.settings.add_file_to_fix(sys.argv[i])
-            elif arg in ["-b", "--bundle-deps"]:
-                self.settings.bundle_libs = True
-            elif arg in ["-p", "--install-path"]:
-                i += 1
-                self.settings.inside_lib_path = sys.argv[i]
-            elif arg in ["-i", "--ignore"]:
-                i += 1
-                self.settings.ignore_prefix(sys.argv[i])
-            elif arg in ["-d", "--dest-dir"]:
-                i += 1
-                self.settings.dest_folder = sys.argv[i]
-            elif arg in ["-of", "--overwrite-files"]:
-                self.settings.overwrite_files = True
-            elif arg in ["-od", "--overwrite-dir"]:
-                self.settings.overwrite_dir = True
-                self.settings.create_dir = True
-            elif arg in ["-cd", "--create-dir"]:
-                self.settings.create_dir = True
-            elif arg in ["-ns", "--no-codesign"]:
-                self.settings.codesign = False
-            elif arg in ["-s", "--search-path"]:
-                i += 1
-                self.settings.add_search_path(sys.argv[i])
-            elif arg in ["-h", "--help"]:
-                self.show_help()
-                sys.exit(0)
-            else:
-                print(f"Unknown flag {arg}")
-                self.show_help()
-                sys.exit(1)
-            i += 1
+        parser = argparse.ArgumentParser(
+                    prog='dylibbundler',
+                    description='dylibbundler is a utility that helps bundle dynamic libraries inside macOS app bundles.',
+                    epilog=("e.g: dylibbundler -od -b -x ./Demo.app/Contents/MacOS/demo -d ./Demo.app/Contents/libs/"))
 
-        if not self.settings.bundle_libs_enabled and (self.settings.file_to_fix_amount < 1):
-            self.show_help()
+        opt = parser.add_argument
+
+        opt("-x", "--fix-file", help="file to fix (executable or app plug-in)")
+        opt("-b", "--bundle-deps", help="bundle dependencies", action="store_true")
+        opt("-d", "--dest-dir", help="directory to send bundled libraries (relative to cwd)")
+        opt("-p", "--install-path", default="@executable_path/../libs/", help="'inner' path of bundled libraries (usually relative to executable")
+        opt("-s", "--search-path", help="directory to add to list of locations searched")
+        opt("-of", "--overwrite-files", help="allow overwriting files in output directory", action="store_true")
+        opt("-od", "--overwrite-dir", help="totally overwrite output directory if it already exists. implies --create-dir", action="store_true")
+        opt("-cd", "--create-dir", help="creates output directory if necessary", action="store_true")
+        opt("-ns", "--no-codesign", help="disables ad-hoc codesigning", action="store_true")
+        opt("-i", "--ignore", help="will ignore libraries in this directory")
+
+        args = parser.parse_args()
+        if args.fix_file:
+            settings.add_file_to_fix(args.fix_file)
+        elif args.bundle_deps:
+            settings.bundle_libs = True
+        elif args.install_path:
+            settings.inside_lib_path = args.install_path
+        elif args.ignore:
+            settings.ignore_prefix(args.ignore)
+        elif args.dest_dir:
+            settings.dest_folder = args.dest_dir
+        elif args.overwrite_files:
+            settings.overwrite_files = True
+        elif args.overwrite_dir:
+            settings.overwrite_dir = True
+            settings.create_dir = True
+        elif args.create_dir:
+            settings.create_dir = True
+        elif args.no_codesign:
+            settings.codesign = False
+        elif args.search_path:
+            settings.add_search_path(args.search_path)
+
+        if not settings.bundle_libs_enabled and (settings.file_to_fix_amount < 1):
+            parser.print_help()
             sys.exit(0)
+
+        # create instance
+        bundler = cls(settings)
 
         print("* Collecting dependencies", end="", flush=True)
 
         # Collect dependencies
-        for i in range(self.settings.file_to_fix_amount):
-            self.collect_dependencies(self.settings.file_to_fix(i))
+        for i in range(bundler.settings.file_to_fix_amount):
+            bundler.collect_dependencies(bundler.settings.file_to_fix(i))
 
-        self.collect_sub_dependencies()
-        self.done_with_deps_go()
+        bundler.collect_sub_dependencies()
+        bundler.done_with_deps_go()
+
+
+
+
+
+    # def show_help(self):
+    #     print("dylibbundler 1.0.5")
+    #     print(
+    #         "dylibbundler is a utility that helps bundle dynamic libraries inside macOS app bundles."
+    #     )
+    #     print("-x, --fix-file <file to fix (executable or app plug-in)>")
+    #     print("-b, --bundle-deps")
+    #     print("-d, --dest-dir <directory to send bundled libraries (relative to cwd)>")
+    #     print(
+    #         "-p, --install-path <'inner' path of bundled libraries (usually relative to executable, by default '@executable_path/../libs/')>"
+    #     )
+    #     print("-s, --search-path <directory to add to list of locations searched>")
+    #     print("-of, --overwrite-files (allow overwriting files in output directory)")
+    #     print(
+    #         "-od, --overwrite-dir (totally overwrite output directory if it already exists. implies --create-dir)"
+    #     )
+    #     print("-cd, --create-dir (creates output directory if necessary)")
+    #     print("-ns, --no-codesign (disables ad-hoc codesigning)")
+    #     print("-i, --ignore <location to ignore> (will ignore libraries in this directory)")
+    #     print("-h, --help")
+
+    # def process(self):
+    #     # Parse command line arguments
+    #     i = 1
+    #     while i < len(sys.argv):
+    #         arg = sys.argv[i]
+    #         if arg in ["-x", "--fix-file"]:
+    #             i += 1
+    #             self.settings.add_file_to_fix(sys.argv[i])
+    #         elif arg in ["-b", "--bundle-deps"]:
+    #             self.settings.bundle_libs = True
+    #         elif arg in ["-p", "--install-path"]:
+    #             i += 1
+    #             self.settings.inside_lib_path = sys.argv[i]
+    #         elif arg in ["-i", "--ignore"]:
+    #             i += 1
+    #             self.settings.ignore_prefix(sys.argv[i])
+    #         elif arg in ["-d", "--dest-dir"]:
+    #             i += 1
+    #             self.settings.dest_folder = sys.argv[i]
+    #         elif arg in ["-of", "--overwrite-files"]:
+    #             self.settings.overwrite_files = True
+    #         elif arg in ["-od", "--overwrite-dir"]:
+    #             self.settings.overwrite_dir = True
+    #             self.settings.create_dir = True
+    #         elif arg in ["-cd", "--create-dir"]:
+    #             self.settings.create_dir = True
+    #         elif arg in ["-ns", "--no-codesign"]:
+    #             self.settings.codesign = False
+    #         elif arg in ["-s", "--search-path"]:
+    #             i += 1
+    #             self.settings.add_search_path(sys.argv[i])
+    #         elif arg in ["-h", "--help"]:
+    #             self.show_help()
+    #             sys.exit(0)
+    #         else:
+    #             print(f"Unknown flag {arg}")
+    #             self.show_help()
+    #             sys.exit(1)
+    #         i += 1
+
+    #     if not self.settings.bundle_libs_enabled and (self.settings.file_to_fix_amount < 1):
+    #         self.show_help()
+    #         sys.exit(0)
+
+    #     print("* Collecting dependencies", end="", flush=True)
+
+    #     # Collect dependencies
+    #     for i in range(self.settings.file_to_fix_amount):
+    #         self.collect_dependencies(self.settings.file_to_fix(i))
+
+    #     self.collect_sub_dependencies()
+    #     self.done_with_deps_go()
 
 
 if __name__ == "__main__":
-    DylibBunder().process()
+    # DylibBunder().process()
+    DylibBunder.commandline()
+
