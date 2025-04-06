@@ -1,6 +1,6 @@
 """dylib_bundler.py
 
-A python tranlation of macdylibbundler
+A python translation of macdylibbundler
 
 """
 
