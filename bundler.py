@@ -1,16 +1,40 @@
 #!/usr/bin/env python3
 
+import argparse
 import os
 import sys
 import shutil
 import subprocess
 import tempfile
-
+from typing import Optional
 
 
 class Settings:
-    overwrite_files = False
-    overwrite_dir = False
+
+    def __init__(
+        self,
+        dest_dir: str = "./libs/",
+        overwrite_files: bool = False,
+        overwrite_dir: bool = False,
+        create_dir: bool = False,
+        codesign: bool = True,
+        bundle_libs: bool = True,
+        inside_lib_path: str = "@executable_path/../libs/",
+        files_to_fix: Optional[list[str]] = None,
+        prefixes_to_ignore: Optional[list[str]] = None,
+        search_paths: Optional[list[str]] = None,
+    ):
+        self.dest_dir = self.ensure_endswith_slash(dest_dir)
+        self.overwrite_files = overwrite_files
+        self.overwrite_dir = overwrite_dir
+        self.create_dir = create_dir
+        self.codesign = codesign
+        self.bundle_libs = bundle_libs
+        self.inside_lib_path = self.ensure_endswith_slash(inside_lib_path)
+        self.files_to_fix = files_to_fix or []
+        self.prefixes_to_ignore = prefixes_to_ignore or []
+        self.search_paths = search_paths or []
+
     create_dir = False
     codesign = True
     bundle_libs = False
@@ -20,80 +44,78 @@ class Settings:
     prefixes_to_ignore: list[str] = []
     search_paths: list[str] = []
 
-    @classmethod
-    def can_overwrite_files(cls) -> bool:
-        return cls.overwrite_files
+    @property
+    def can_overwrite_files(self) -> bool:
+        return self.overwrite_files
 
-    @classmethod
-    def can_overwrite_dir(cls) -> bool:
-        return cls.overwrite_dir
+    @property
+    def can_overwrite_dir(self) -> bool:
+        return self.overwrite_dir
 
-    @classmethod
-    def can_create_dir(cls) -> bool:
-        return cls.create_dir
+    @property
+    def can_create_dir(self) -> bool:
+        return self.create_dir
 
-    @classmethod
-    def can_codesign(cls) -> bool:
-        return cls.codesign
+    @property
+    def can_codesign(self) -> bool:
+        return self.codesign
 
-    @classmethod
-    def bundle_libs_enabled(cls) -> bool:
-        return cls.bundle_libs
+    @property
+    def bundle_libs_enabled(self) -> bool:
+        return self.bundle_libs
 
-    @classmethod
-    def add_file_to_fix(cls, path: str) -> None:
-        cls.files_to_fix.append(path)
+    @property
+    def file_to_fix_amount(self) -> int:
+        return len(self.files_to_fix)
 
-    @classmethod
-    def file_to_fix_amount(cls) -> int:
-        return len(cls.files_to_fix)
+    @property
+    def search_path_amount(self) -> int:
+        return len(self.search_paths)
 
-    @classmethod
-    def file_to_fix(cls, index: int) -> str:
-        return cls.files_to_fix[index]
+    def ensure_endswith_slash(self, path: str):
+        """ensure path endswith '/'"""
+        if not path.endswith("/"):
+            path += "/"
+        return path
 
-    @classmethod
-    def ignore_prefix(cls, prefix: str) -> None:
+    def add_search_path(self, path: str) -> None:
+        self.search_paths.append(path)
+
+    def search_path(self, index: int) -> str:
+        return self.search_paths[index]
+
+    def add_file_to_fix(self, path: str) -> None:
+        self.files_to_fix.append(path)
+
+    def file_to_fix(self, index: int) -> str:
+        return self.files_to_fix[index]
+
+    def ignore_prefix(self, prefix: str) -> None:
         if not prefix.endswith("/"):
             prefix += "/"
-        cls.prefixes_to_ignore.append(prefix)
+        self.prefixes_to_ignore.append(prefix)
 
-    @classmethod
-    def is_system_library(cls, prefix: str) -> bool:
+    def is_system_library(self, prefix: str) -> bool:
         return prefix.startswith("/usr/lib/") or prefix.startswith("/System/Library/")
 
-    @classmethod
-    def is_prefix_ignored(cls, prefix: str) -> bool:
-        return prefix in cls.prefixes_to_ignore
+    def is_prefix_ignored(self, prefix: str) -> bool:
+        return prefix in self.prefixes_to_ignore
 
-    @classmethod
-    def is_prefix_bundled(cls, prefix: str) -> bool:
+    def is_prefix_bundled(self, prefix: str) -> bool:
         if ".framework" in prefix:
             return False
         if "@executable_path" in prefix:
             return False
-        if cls.is_system_library(prefix):
+        if self.is_system_library(prefix):
             return False
-        if cls.is_prefix_ignored(prefix):
+        if self.is_prefix_ignored(prefix):
             return False
         return True
 
-    @classmethod
-    def add_search_path(cls, path: str) -> None:
-        cls.search_paths.append(path)
-
-    @classmethod
-    def search_path_amount(cls) -> int:
-        return len(cls.search_paths)
-
-    @classmethod
-    def search_path(cls, index: int) -> str:
-        return cls.search_paths[index]
-
-
 
 class Dependency:
-    def __init__(self, path: str, dependent_file: str):
+    def __init__(self, settings: Settings, path: str, dependent_file: str):
+        self.settings = settings
         self.filename = ""
         self.prefix = ""
         self.symlinks: list[str] = []
@@ -118,29 +140,29 @@ class Dependency:
         self.prefix = os.path.dirname(original_file) + "/"
 
         # Check if this dependency should be bundled
-        if not Settings.is_prefix_bundled(self.prefix):
+        if not self.settings.is_prefix_bundled(self.prefix):
             return
 
         # Check if the lib is in a known location
         if not self.prefix or not os.path.exists(self.prefix + self.filename):
-            if Settings.search_path_amount() == 0:
+            if self.settings.search_path_amount == 0:
                 self._init_search_paths()
 
             # Check if file is contained in one of the paths
-            for search_path in Settings.search_paths:
+            for search_path in self.settings.search_paths:
                 if os.path.exists(search_path + self.filename):
                     print(f"FOUND {self.filename} in {search_path}")
                     self.prefix = search_path
                     break
 
         # If location still unknown, ask user for search path
-        if not Settings.is_prefix_ignored(self.prefix) and (
+        if not self.settings.is_prefix_ignored(self.prefix) and (
             not self.prefix or not os.path.exists(self.prefix + self.filename)
         ):
             print(
                 f"WARNING : Library {self.filename} has an incomplete name (location unknown)"
             )
-            Settings.add_search_path(self._get_user_input_dir_for_file(self.filename))
+            self.settings.add_search_path(self._get_user_input_dir_for_file(self.filename))
 
         self.new_name = self.filename
 
@@ -169,7 +191,7 @@ class Dependency:
         for path in search_paths:
             if not path.endswith("/"):
                 path += "/"
-            Settings.add_search_path(path)
+            self.settings.add_search_path(path)
 
     def _get_user_input_dir_for_file(self, filename: str) -> str:
         # Implementation of user input for missing libraries
@@ -184,10 +206,10 @@ class Dependency:
         return self.prefix + self.filename
 
     def get_install_path(self) -> str:
-        return Settings.dest_folder + self.new_name
+        return self.settings.dest_folder + self.new_name
 
     def get_inner_path(self) -> str:
-        return Settings.inside_lib_path + self.new_name
+        return self.settings.inside_lib_path + self.new_name
 
     def add_symlink(self, symlink: str) -> None:
         if symlink not in self.symlinks:
@@ -249,7 +271,8 @@ class Dependency:
 
 
 class DylibBunder:
-    def __init__(self):
+    def __init__(self, settings: Optional[Settings] = None):
+        self.settings = settings or Settings()
         self.deps: list[Dependency] = []
         self.deps_per_file: dict[str, list[Dependency]] = {}
         self.deps_collected: dict[str, bool] = {}
@@ -275,7 +298,7 @@ class DylibBunder:
 
             # trim useless info, keep only library name
             dep_path = line[1 : line.rfind(" (")]
-            if Settings.is_system_library(dep_path):
+            if self.settings.is_system_library(dep_path):
                 continue
 
             self.add_dependency(dep_path, filename)
@@ -356,7 +379,7 @@ class DylibBunder:
 
     def add_dependency(self, path: str, filename: str) -> None:
         """Add a new dependency."""
-        dep = Dependency(path, filename)
+        dep = Dependency(self.settings, path, filename)
 
         # Check if this library was already added to avoid duplicates
         in_deps = False
@@ -373,7 +396,7 @@ class DylibBunder:
                 in_deps_per_file = True
                 break
 
-        if not Settings.is_prefix_bundled(dep.prefix):
+        if not self.settings.is_prefix_bundled(dep.prefix):
             return
 
         if not in_deps:
@@ -410,7 +433,7 @@ class DylibBunder:
             dep.print()
         print()
 
-        if Settings.bundle_libs_enabled():
+        if self.settings.bundle_libs_enabled:
             self.create_dest_dir()
 
             for dep in reversed(self.deps):
@@ -420,8 +443,8 @@ class DylibBunder:
                 self.fix_rpaths_on_file(dep.get_original_path(), dep.get_install_path())
                 self.adhoc_codesign(dep.get_install_path())
 
-        for i in range(Settings.file_to_fix_amount() - 1, -1, -1):
-            file_to_fix = Settings.file_to_fix(i)
+        for i in range(self.settings.file_to_fix_amount - 1, -1, -1):
+            file_to_fix = self.settings.file_to_fix(i)
             print(f"* Processing {file_to_fix}")
             try:
                 shutil.copy2(file_to_fix, file_to_fix)  # to set write permission
@@ -434,12 +457,12 @@ class DylibBunder:
 
     def create_dest_dir(self) -> None:
         """Create the destination directory if needed."""
-        dest_folder = Settings.dest_folder
+        dest_folder = self.settings.dest_folder
         print(f"* Checking output directory {dest_folder}")
 
         dest_exists = os.path.exists(dest_folder)
 
-        if dest_exists and Settings.can_overwrite_dir():
+        if dest_exists and self.settings.can_overwrite_dir:
             print(f"* Erasing old output directory {dest_folder}")
             try:
                 shutil.rmtree(dest_folder)
@@ -449,7 +472,7 @@ class DylibBunder:
             dest_exists = False
 
         if not dest_exists:
-            if Settings.can_create_dir():
+            if self.settings.can_create_dir:
                 print(f"* Creating output directory {dest_folder}")
                 try:
                     os.makedirs(dest_folder)
@@ -479,14 +502,14 @@ class DylibBunder:
         rpaths_to_fix = self.rpaths_per_file.get(original_file, [])
 
         for rpath in rpaths_to_fix:
-            command = f'install_name_tool -rpath "{rpath}" "{Settings.inside_lib_path}" "{file_to_fix}"'
+            command = f'install_name_tool -rpath "{rpath}" "{self.settings.inside_lib_path}" "{file_to_fix}"'
             if subprocess.call(command, shell=True) != 0:
                 print(f"Error: An error occurred while trying to fix dependencies of {file_to_fix}")
 
 
     def adhoc_codesign(self, file: str) -> None:
         """Apply ad-hoc code signing to a file."""
-        if not Settings.can_codesign():
+        if not self.settings.can_codesign:
             return
 
         sign_command = f'codesign --force --deep --preserve-metadata=entitlements,requirements,flags,runtime --sign - "{file}"'
@@ -553,30 +576,30 @@ class DylibBunder:
             arg = sys.argv[i]
             if arg in ["-x", "--fix-file"]:
                 i += 1
-                Settings.add_file_to_fix(sys.argv[i])
+                self.settings.add_file_to_fix(sys.argv[i])
             elif arg in ["-b", "--bundle-deps"]:
-                Settings.bundle_libs = True
+                self.settings.bundle_libs = True
             elif arg in ["-p", "--install-path"]:
                 i += 1
-                Settings.inside_lib_path = sys.argv[i]
+                self.settings.inside_lib_path = sys.argv[i]
             elif arg in ["-i", "--ignore"]:
                 i += 1
-                Settings.ignore_prefix(sys.argv[i])
+                self.settings.ignore_prefix(sys.argv[i])
             elif arg in ["-d", "--dest-dir"]:
                 i += 1
-                Settings.dest_folder = sys.argv[i]
+                self.settings.dest_folder = sys.argv[i]
             elif arg in ["-of", "--overwrite-files"]:
-                Settings.overwrite_files = True
+                self.settings.overwrite_files = True
             elif arg in ["-od", "--overwrite-dir"]:
-                Settings.overwrite_dir = True
-                Settings.create_dir = True
+                self.settings.overwrite_dir = True
+                self.settings.create_dir = True
             elif arg in ["-cd", "--create-dir"]:
-                Settings.create_dir = True
+                self.settings.create_dir = True
             elif arg in ["-ns", "--no-codesign"]:
-                Settings.codesign = False
+                self.settings.codesign = False
             elif arg in ["-s", "--search-path"]:
                 i += 1
-                Settings.add_search_path(sys.argv[i])
+                self.settings.add_search_path(sys.argv[i])
             elif arg in ["-h", "--help"]:
                 self.show_help()
                 sys.exit(0)
@@ -586,23 +609,18 @@ class DylibBunder:
                 sys.exit(1)
             i += 1
 
-        if not Settings.bundle_libs_enabled() and Settings.file_to_fix_amount() < 1:
+        if not self.settings.bundle_libs_enabled and (self.settings.file_to_fix_amount < 1):
             self.show_help()
             sys.exit(0)
 
         print("* Collecting dependencies", end="", flush=True)
 
         # Collect dependencies
-        for i in range(Settings.file_to_fix_amount()):
-            self.collect_dependencies(Settings.file_to_fix(i))
+        for i in range(self.settings.file_to_fix_amount):
+            self.collect_dependencies(self.settings.file_to_fix(i))
 
         self.collect_sub_dependencies()
         self.done_with_deps_go()
-
-
-
-
-
 
 
 if __name__ == "__main__":
