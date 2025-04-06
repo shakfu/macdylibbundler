@@ -1,4 +1,33 @@
 #!/usr/bin/env python3
+"""bundler is a utility that helps bundle dynamic libraries inside macOS app bundles.
+
+usage: bundler [-h] [-x FIX_FILE] [-b] [-d DEST_DIR] [-p INSTALL_PATH]
+                    [-s SEARCH_PATH] [-of] [-od] [-cd] [-ns] [-i IGNORE]
+
+bundler is a utility that helps bundle dynamic libraries inside macOS app bundles.
+
+options:
+  -h, --help            show this help message and exit
+  -x, --fix-file FIX_FILE
+                        file to fix (executable or app plug-in)
+  -b, --bundle-deps     bundle dependencies
+  -d, --dest-dir DEST_DIR
+                        directory to send bundled libraries (relative to cwd)
+  -p, --install-path INSTALL_PATH
+                        'inner' path of bundled libraries (usually relative to
+                        executable
+  -s, --search-path SEARCH_PATH
+                        directory to add to list of locations searched
+  -of, --overwrite-files
+                        allow overwriting files in output directory
+  -od, --overwrite-dir  totally overwrite output directory if it already
+                        exists. implies --create-dir
+  -cd, --create-dir     creates output directory if necessary
+  -ns, --no-codesign    disables ad-hoc codesigning
+  -i, --ignore IGNORE   will ignore libraries in this directory
+
+e.g: bundler -od -b -x ./Demo.app/Contents/MacOS/demo -d ./Demo.app/Contents/libs/
+"""
 
 import argparse
 import os
@@ -11,6 +40,20 @@ from typing import Optional
 
 
 class Settings:
+    """Settings for a DylibBundler instance.
+
+    Args:
+        dest_dir: The directory to store the bundled libraries.
+        overwrite_files: Whether to overwrite existing files in the output directory.
+        overwrite_dir: Whether to overwrite the output directory if it already exists.
+        create_dir: Whether to create the output directory if it doesn't exist.
+        codesign: Whether to codesign the bundled libraries.
+        bundle_libs: Whether to bundle the libraries.
+        inside_lib_path: The path to the bundled libraries inside the app bundle.
+        files_to_fix: The files to fix.
+        prefixes_to_ignore: The prefixes to ignore.
+        search_paths: The search paths.
+    """
 
     def __init__(
         self,
@@ -36,73 +79,88 @@ class Settings:
         self.prefixes_to_ignore = prefixes_to_ignore or []
         self.search_paths = search_paths or []
 
-    create_dir = False
-    codesign = True
-    bundle_libs = False
-    dest_folder = "./libs/"
-    inside_lib_path = "@executable_path/../libs/"
+    create_dir: bool = False
+    codesign: bool = True
+    bundle_libs: bool = False
+    dest_folder: str = "./libs/"
+    inside_lib_path: str = "@executable_path/../libs/"
     files_to_fix: list[str] = []
     prefixes_to_ignore: list[str] = []
     search_paths: list[str] = []
 
     @property
     def can_overwrite_files(self) -> bool:
+        """Whether to overwrite existing files in the output directory."""
         return self.overwrite_files
 
     @property
     def can_overwrite_dir(self) -> bool:
+        """Whether to overwrite the output directory if it already exists."""
         return self.overwrite_dir
 
     @property
     def can_create_dir(self) -> bool:
+        """Whether to create the output directory if it doesn't exist."""
         return self.create_dir
 
     @property
     def can_codesign(self) -> bool:
+        """Whether to codesign the bundled libraries."""
         return self.codesign
 
     @property
     def bundle_libs_enabled(self) -> bool:
+        """Whether to bundle the libraries."""
         return self.bundle_libs
 
     @property
     def file_to_fix_amount(self) -> int:
+        """The number of files to fix."""
         return len(self.files_to_fix)
 
     @property
     def search_path_amount(self) -> int:
+        """The number of search paths."""
         return len(self.search_paths)
 
-    def ensure_endswith_slash(self, path: str):
-        """ensure path endswith '/'"""
+    def ensure_endswith_slash(self, path: str) -> str:
+        """Ensure path ends with '/'."""
         if not path.endswith("/"):
             path += "/"
         return path
 
     def add_search_path(self, path: str) -> None:
+        """Add a search path."""
         self.search_paths.append(path)
 
     def search_path(self, index: int) -> str:
+        """Get a search path by index."""
         return self.search_paths[index]
 
     def add_file_to_fix(self, path: str) -> None:
+        """Add a file to fix."""
         self.files_to_fix.append(path)
 
     def file_to_fix(self, index: int) -> str:
+        """Get a file to fix by index."""
         return self.files_to_fix[index]
 
     def ignore_prefix(self, prefix: str) -> None:
+        """Ignore a prefix."""
         if not prefix.endswith("/"):
             prefix += "/"
         self.prefixes_to_ignore.append(prefix)
 
     def is_system_library(self, prefix: str) -> bool:
+        """Check if a prefix is a system library."""
         return prefix.startswith("/usr/lib/") or prefix.startswith("/System/Library/")
 
     def is_prefix_ignored(self, prefix: str) -> bool:
+        """Check if a prefix is ignored."""
         return prefix in self.prefixes_to_ignore
 
     def is_prefix_bundled(self, prefix: str) -> bool:
+        """Check if a prefix is bundled."""
         if ".framework" in prefix:
             return False
         if "@executable_path" in prefix:
@@ -115,8 +173,17 @@ class Settings:
 
 
 class Dependency:
-    def __init__(self, settings: Settings, path: str, dependent_file: str):
-        self.settings = settings
+    """A dependency of a file.
+
+    Args:
+        settings: The settings for a DylibBundler instance.
+        path: The path to the dependency.
+        dependent_file: The file that depends on the dependency.
+    """
+
+    def __init__(self, parent: "DylibBundler", path: str, dependent_file: str):
+        self.parent = parent
+        self.settings = parent.settings
         self.filename = ""
         self.prefix = ""
         self.symlinks: list[str] = []
@@ -167,76 +234,8 @@ class Dependency:
 
         self.new_name = self.filename
 
-    def _is_rpath(self, path: str) -> bool:
-        return path.startswith("@rpath") or path.startswith("@loader_path")
-
-    def _search_filename_in_rpaths(self, rpath_file: str, dependent_file: str) -> str:
-        fullpath = ""
-        suffix = re.sub(r"^@[a-z_]+path/", "", rpath_file)
-
-        def check_path(path: str):
-            file_prefix = dependent_file[0:dependent_file.rfind('/') + 1]
-            if dependent_file != rpath_file:
-                path_to_check = ""
-                if "@loader_path" in path:
-                    path_to_check = re.sub(r"@loader_path/", file_prefix, path)
-                elif "@rpath" in path:
-                    path_to_check = re.sub(r"@rpath/", file_prefix, path)
-
-                fullpath = os.path.abspath(path_to_check)
-                self.rpath_to_fullpath[rpath_file] = fullpath
-                return True
-            return False
-
-        if rpath_file in self.rpath_to_fullpath:
-            fullpath = self.rpath_to_fullpath[rpath_file]
-
-        elif not check_path(rpath_file):
-            for rpath in self.rpaths_per_file[dependent_file]:
-                if not rpath.endswith('/'):
-                    rpath += "/"
-                if check_path(rpath + suffix):
-                    break
-
-            if rpath_file in self.rpath_to_fullpath:
-                fullpath = self.rpath_to_fullpath[rpath_file]
-
-        if not fullpath:
-            search_path_amount = self.settings.search_path_amount
-            for n in range(search_path_amount):
-                search_path = self.settings.search_path(n)
-                if os.path.exists(search_path + suffix):
-                    fullpath = search_path + suffix
-                    break
-
-            if not fullpath:
-                print(f"WARNING : can't get path for '{rpath_file}'")
-                fullpath = self._get_user_input_dir_for_file(suffix) + suffix
-                fullpath = os.path.abspath(fullpath)
-
-        return fullpath
-
-
-
-    def _init_search_paths(self) -> None:
-        # Initialize search paths from environment variables
-        search_paths = []
-
-        for env_var in [
-            "DYLD_LIBRARY_PATH",
-            "DYLD_FALLBACK_FRAMEWORK_PATH",
-            "DYLD_FALLBACK_LIBRARY_PATH",
-        ]:
-            if env_var in os.environ:
-                paths = os.environ[env_var].split(":")
-                search_paths.extend(paths)
-
-        for path in search_paths:
-            if not path.endswith("/"):
-                path += "/"
-            self.settings.add_search_path(path)
-
     def _get_user_input_dir_for_file(self, filename: str) -> str:
+        """Get a user input directory for a file."""
         search_path_amount = self.settings.search_path_amount
         for n in range(search_path_amount):
             search_path = self.settings.search_path(n)
@@ -272,30 +271,107 @@ class Dependency:
                 self.settings.add_search_path(prefix)
                 return prefix
 
+    def _search_filename_in_rpaths(self, rpath_file: str, dependent_file: str) -> str:
+        """Search for a filename in rpaths."""
+        fullpath = ""
+        suffix = re.sub(r"^@[a-z_]+path/", "", rpath_file)
+
+        def check_path(path: str) -> bool:
+            """Check if a path is valid."""
+            file_prefix = dependent_file[0:dependent_file.rfind('/') + 1]
+            if dependent_file != rpath_file:
+                path_to_check = ""
+                if "@loader_path" in path:
+                    path_to_check = re.sub(r"@loader_path/", file_prefix, path)
+                elif "@rpath" in path:
+                    path_to_check = re.sub(r"@rpath/", file_prefix, path)
+
+                fullpath = os.path.abspath(path_to_check)
+                self.parent.rpath_to_fullpath[rpath_file] = fullpath
+                return True
+            return False
+
+        if rpath_file in self.parent.rpath_to_fullpath:
+            fullpath = self.parent.rpath_to_fullpath[rpath_file]
+
+        elif not check_path(rpath_file):
+            for rpath in self.parent.rpaths_per_file[dependent_file]:
+                if not rpath.endswith('/'):
+                    rpath += "/"
+                if check_path(rpath + suffix):
+                    break
+
+            if rpath_file in self.parent.rpath_to_fullpath:
+                fullpath = self.parent.rpath_to_fullpath[rpath_file]
+
+        if not fullpath:
+            search_path_amount = self.settings.search_path_amount
+            for n in range(search_path_amount):
+                search_path = self.settings.search_path(n)
+                if os.path.exists(search_path + suffix):
+                    fullpath = search_path + suffix
+                    break
+
+            if not fullpath:
+                print(f"WARNING: can't get path for '{rpath_file}'")
+                fullpath = self._get_user_input_dir_for_file(suffix) + suffix
+                fullpath = os.path.abspath(fullpath)
+
+        return fullpath
+
+    def _is_rpath(self, path: str) -> bool:
+        """Check if a path is an rpath."""
+        return path.startswith("@rpath") or path.startswith("@loader_path")
+
+    def _init_search_paths(self) -> None:
+        """Initialize search paths from environment variables."""
+        search_paths = []
+
+        for env_var in [
+            "DYLD_LIBRARY_PATH",
+            "DYLD_FALLBACK_FRAMEWORK_PATH",
+            "DYLD_FALLBACK_LIBRARY_PATH",
+        ]:
+            if env_var in os.environ:
+                paths = os.environ[env_var].split(":")
+                search_paths.extend(paths)
+
+        for path in search_paths:
+            if not path.endswith("/"):
+                path += "/"
+            self.settings.add_search_path(path)
+
     def get_original_filename(self) -> str:
+        """Get the original filename."""
         return self.filename
 
     def get_original_path(self) -> str:
+        """Get the original path."""
         return self.prefix + self.filename
 
     def get_install_path(self) -> str:
+        """Get the install path."""
         return self.settings.dest_folder + self.new_name
 
     def get_inner_path(self) -> str:
+        """Get the inner path."""
         return self.settings.inside_lib_path + self.new_name
 
     def add_symlink(self, symlink: str) -> None:
+        """Add a symlink."""
         if symlink not in self.symlinks:
             self.symlinks.append(symlink)
 
     def get_symlink_amount(self) -> int:
+        """Get the number of symlinks."""
         return len(self.symlinks)
 
     def get_symlink(self, index: int) -> str:
+        """Get a symlink by index."""
         return self.symlinks[index]
 
     def copy_yourself(self) -> None:
-        # Copy the file
+        """Copy the file."""
         shutil.copy2(self.get_original_path(), self.get_install_path())
 
         # Fix the lib's inner name
@@ -307,7 +383,7 @@ class Dependency:
             sys.exit(1)
 
     def fix_file_that_depends_on_me(self, file_to_fix: str) -> None:
-        # Fix dependencies in the file
+        """Fix dependencies in a file."""
         self._change_install_name(
             file_to_fix, self.get_original_path(), self.get_inner_path()
         )
@@ -317,6 +393,7 @@ class Dependency:
             self._change_install_name(file_to_fix, symlink, self.get_inner_path())
 
     def _change_install_name(self, binary_file: str, old_name: str, new_name: str) -> None:
+        """Change the install name of a file."""
         command = f'install_name_tool -change "{old_name}" "{new_name}" "{binary_file}"'
         if subprocess.call(command, shell=True) != 0:
             print(
@@ -333,15 +410,20 @@ class Dependency:
             return True
         return False
 
-    def print(self):
+    def print(self) -> None:
+        """Print the dependency."""
         print(f" * {self.filename} from {self.prefix}")
         for sym in self.symlinks:
             print(f"    symlink --> {sym}")
 
 
+class DylibBundler:
+    """A DylibBundler instance.
 
+    Args:
+        settings: The settings for a DylibBundler instance.
+    """
 
-class DylibBunder:
     def __init__(self, settings: Optional[Settings] = None):
         self.settings = settings or Settings()
         self.deps: list[Dependency] = []
@@ -408,7 +490,6 @@ class DylibBunder:
 
         return lines
 
-
     def collect_rpaths(self, filename: str) -> None:
         """Collect rpaths for a given file."""
         if not os.path.exists(filename):
@@ -450,7 +531,7 @@ class DylibBunder:
 
     def add_dependency(self, path: str, filename: str) -> None:
         """Add a new dependency."""
-        dep = Dependency(self.settings, path, filename)
+        dep = Dependency(self, path, filename)
 
         # Check if this library was already added to avoid duplicates
         in_deps = False
@@ -620,13 +701,14 @@ class DylibBunder:
                     sys.exit(1)
 
     @classmethod
-    def commandline(cls):
+    def commandline(cls) -> None:
+        """Command line interface for DylibBundler."""
         settings = Settings()
 
         parser = argparse.ArgumentParser(
-                    prog='dylibbundler',
-                    description='dylibbundler is a utility that helps bundle dynamic libraries inside macOS app bundles.',
-                    epilog=("e.g: dylibbundler -od -b -x ./Demo.app/Contents/MacOS/demo -d ./Demo.app/Contents/libs/"))
+                    prog='bundler',
+                    description='bundler is a utility that helps bundle dynamic libraries inside macOS app bundles.',
+                    epilog=("e.g: bundler -od -b -x ./Demo.app/Contents/MacOS/demo -d ./Demo.app/Contents/libs/"))
 
         opt = parser.add_argument
 
@@ -760,6 +842,6 @@ class DylibBunder:
 
 
 if __name__ == "__main__":
-    # DylibBunder().process()
-    DylibBunder.commandline()
+    # DylibBundler().process()
+    DylibBundler.commandline()
 
