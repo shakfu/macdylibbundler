@@ -29,7 +29,9 @@ options:
 e.g: bundler -od -b -x ./Demo.app/Contents/MacOS/demo -d ./Demo.app/Contents/libs/
 """
 
+import datetime
 import argparse
+import logging
 import os
 import re
 import sys
@@ -38,6 +40,65 @@ import subprocess
 import tempfile
 from typing import Optional
 
+DEBUG = True
+COLOR = True
+
+CAVEAT = "MAY NOT CORRECTLY HANDLE THIS DEPENDENCY: Manually check the executable with 'otool -L'"
+
+# ----------------------------------------------------------------------------
+# logging config
+
+class CustomFormatter(logging.Formatter):
+    """custom logging formatting class"""
+
+    white = "\x1b[97;20m"
+    grey = "\x1b[38;20m"
+    green = "\x1b[32;20m"
+    cyan = "\x1b[36;20m"
+    yellow = "\x1b[33;20m"
+    red = "\x1b[31;20m"
+    bold_red = "\x1b[31;1m"
+    reset = "\x1b[0m"
+    fmt = "%(delta)s - %(levelname)s - %(name)s.%(funcName)s - %(message)s"
+    cfmt = (f"{white}%(delta)s{reset} - "
+            f"{{}}%(levelname)s{{}} - "
+            f"{white}%(name)s.%(funcName)s{reset} - "
+            f"{grey}%(message)s{reset}")
+
+    FORMATS = {
+        logging.DEBUG: cfmt.format(grey, reset),
+        logging.INFO: cfmt.format(green, reset),
+        logging.WARNING: cfmt.format(yellow, reset),
+        logging.ERROR: cfmt.format(red, reset),
+        logging.CRITICAL: cfmt.format(bold_red, reset),
+    }
+
+    def __init__(self, use_color=COLOR):
+        self.use_color = use_color
+
+    def format(self, record):
+        """custom logger formatting method"""
+        if not self.use_color:
+            log_fmt = self.fmt
+        else:
+            log_fmt = self.FORMATS.get(record.levelno)
+            duration = datetime.datetime.fromtimestamp(
+                record.relativeCreated / 1000, datetime.UTC
+            )
+        record.delta = duration.strftime("%H:%M:%S")
+        formatter = logging.Formatter(log_fmt)
+        return formatter.format(record)
+
+
+strm_handler = logging.StreamHandler()
+strm_handler.setFormatter(CustomFormatter())
+logging.basicConfig(
+    level=logging.DEBUG if DEBUG else logging.INFO,
+    handlers=[strm_handler],
+)
+
+# ----------------------------------------------------------------------------
+# classes
 
 class Settings:
     """Settings for a DylibBundler instance.
@@ -188,6 +249,7 @@ class Dependency:
         self.prefix = ""
         self.symlinks: list[str] = []
         self.new_name = ""
+        self.log = logging.getLogger(self.__class__.__name__)
 
         # Resolve the original file path
         path = path.strip()
@@ -197,7 +259,7 @@ class Dependency:
             try:
                 original_file = os.path.realpath(path)
             except OSError:
-                print(f"WARNING : Cannot resolve path '{path}'")
+                self.log.warning("Cannot resolve path '%s'", path)
                 original_file = path
 
         # Check if given path is a symlink
@@ -219,7 +281,7 @@ class Dependency:
             # Check if file is contained in one of the paths
             for search_path in self.settings.search_paths:
                 if os.path.exists(search_path + self.filename):
-                    print(f"FOUND {self.filename} in {search_path}")
+                    self.log.info(f"FOUND {self.filename} in {search_path}")
                     self.prefix = search_path
                     break
 
@@ -227,9 +289,7 @@ class Dependency:
         if not self.settings.is_prefix_ignored(self.prefix) and (
             not self.prefix or not os.path.exists(self.prefix + self.filename)
         ):
-            print(
-                f"WARNING : Library {self.filename} has an incomplete name (location unknown)"
-            )
+            self.log.warning("Library %s has an incomplete name (location unknown)", self.filename)
             self.settings.add_search_path(self._get_user_input_dir_for_file(self.filename))
 
         self.new_name = self.filename
@@ -243,9 +303,7 @@ class Dependency:
                 search_path += "/"
 
             if os.path.exists(search_path + filename):
-                print(f"{search_path + filename} was found. DYLIBBUNDLER MAY NOT CORRECTLY "
-                             "HANDLE THIS DEPENDENCY: Manually check the "
-                             "executable with 'otool -L'")
+                self.log.info("%s was found. %s", search_path + filename, CAVEAT)
                 return search_path
 
         while True:
@@ -261,13 +319,11 @@ class Dependency:
                 prefix += "/"
 
             if not os.path.exists(prefix + filename):
-                print(f"{prefix + filename} does not exist. Try again")
+                self.log.info(f"{prefix + filename} does not exist. Try again")
                 continue
 
             else:
-                print(f"{prefix + filename} was found. DYLIBBUNDLER MAY NOT CORRECTLY "
-                             "HANDLE THIS DEPENDENCY: Manually check the "
-                             "executable with 'otool -L'")
+                self.log.info("%s was found. %s", prefix + filename, CAVEAT)
                 self.settings.add_search_path(prefix)
                 return prefix
 
@@ -313,7 +369,7 @@ class Dependency:
                     break
 
             if not fullpath:
-                print(f"WARNING: can't get path for '{rpath_file}'")
+                self.log.warning("can't get path for '%s'", rpath_file)
                 fullpath = self._get_user_input_dir_for_file(suffix) + suffix
                 fullpath = os.path.abspath(fullpath)
 
@@ -377,9 +433,8 @@ class Dependency:
         # Fix the lib's inner name
         command = f'install_name_tool -id "{self.get_inner_path()}" "{self.get_install_path()}"'
         if subprocess.call(command, shell=True) != 0:
-            print(
-                f"Error: An error occurred while trying to change identity of library {self.get_install_path()}"
-            )
+            self.log.error("An error occurred while trying to change identity of library %s",
+                self.get_install_path())
             sys.exit(1)
 
     def fix_file_that_depends_on_me(self, file_to_fix: str) -> None:
@@ -396,9 +451,7 @@ class Dependency:
         """Change the install name of a file."""
         command = f'install_name_tool -change "{old_name}" "{new_name}" "{binary_file}"'
         if subprocess.call(command, shell=True) != 0:
-            print(
-                f"Error: An error occurred while trying to fix dependencies of {binary_file}"
-            )
+            self.log.error("An error occurred while trying to fix dependencies of %s", binary_file)
             sys.exit(1)
 
     def merge_if_same_as(self, dep2: "Dependency") -> bool:
@@ -412,9 +465,9 @@ class Dependency:
 
     def print(self) -> None:
         """Print the dependency."""
-        print(f" * {self.filename} from {self.prefix}")
+        self.log.info(f"{self.filename} from {self.prefix}")
         for sym in self.symlinks:
-            print(f"    symlink --> {sym}")
+            self.log.info(f"    symlink --> {sym}")
 
 
 class DylibBundler:
@@ -431,6 +484,7 @@ class DylibBundler:
         self.deps_collected: dict[str, bool] = {}
         self.rpaths_per_file: dict[str, list[str]] = {}
         self.rpath_to_fullpath: dict[str, str] = {}
+        self.log = logging.getLogger(self.__class__.__name__)
 
     def collect_dependencies(self, filename: str) -> None:
         """Collect dependencies for a given file."""
@@ -462,14 +516,14 @@ class DylibBundler:
     def _collect_dependency_lines(self, filename: str) -> list[str]:
         """Execute otool -l and collect dependency lines."""
         if not os.path.exists(filename):
-            print(f"Cannot find file {filename} to read its dependencies")
+            self.log.error("Cannot find file %s to read its dependencies", filename)
             sys.exit(1)
 
         cmd = f'otool -l "{filename}"'
         try:
             output = subprocess.check_output(cmd, shell=True, text=True)
         except subprocess.CalledProcessError:
-            print(f"Error running otool on {filename}")
+            self.log.error("Error running otool on %s", filename)
             sys.exit(1)
 
         lines = []
@@ -479,7 +533,7 @@ class DylibBundler:
         for line in raw_lines:
             if "cmd LC_LOAD_DYLIB" in line or "cmd LC_REEXPORT_DYLIB" in line:
                 if searching:
-                    print("ERROR: Failed to find name before next cmd")
+                    self.log.error("Failed to find name before next cmd")
                     sys.exit(1)
                 searching = True
             elif searching:
@@ -493,7 +547,7 @@ class DylibBundler:
     def collect_rpaths(self, filename: str) -> None:
         """Collect rpaths for a given file."""
         if not os.path.exists(filename):
-            print(f"WARNING : can't collect rpaths for nonexistent file '{filename}'")
+            self.log.warning(f"can't collect rpaths for nonexistent file '%s'", filename)
             return
 
         cmd = f'otool -l "{filename}"'
@@ -514,7 +568,7 @@ class DylibBundler:
                 start_pos = line.find("path ")
                 end_pos = line.find(" (")
                 if start_pos == -1 or end_pos == -1:
-                    print("WARNING: Unexpected LC_RPATH format")
+                    self.log.warning("Unexpected LC_RPATH format")
                     continue
                 start_pos += 5
                 rpath = line[start_pos:end_pos]
@@ -589,7 +643,7 @@ class DylibBundler:
             self.create_dest_dir()
 
             for dep in reversed(self.deps):
-                print(f"* Processing dependency {dep.get_install_path()}")
+                self.log.info("Processing dependency %s", dep.get_install_path())
                 dep.copy_yourself()
                 self.change_lib_paths_on_file(dep.get_install_path())
                 self.fix_rpaths_on_file(dep.get_original_path(), dep.get_install_path())
@@ -597,7 +651,7 @@ class DylibBundler:
 
         for i in range(self.settings.file_to_fix_amount - 1, -1, -1):
             file_to_fix = self.settings.file_to_fix(i)
-            print(f"* Processing {file_to_fix}")
+            self.log.info("* Processing %s", file_to_fix)
             try:
                 shutil.copy2(file_to_fix, file_to_fix)  # to set write permission
             except shutil.SameFileError:
@@ -610,29 +664,29 @@ class DylibBundler:
     def create_dest_dir(self) -> None:
         """Create the destination directory if needed."""
         dest_folder = self.settings.dest_folder
-        print(f"* Checking output directory {dest_folder}")
+        self.log.info("Checking output directory %s", dest_folder)
 
         dest_exists = os.path.exists(dest_folder)
 
         if dest_exists and self.settings.can_overwrite_dir:
-            print(f"* Erasing old output directory {dest_folder}")
+            self.log.info("Erasing old output directory %s", dest_folder)
             try:
                 shutil.rmtree(dest_folder)
             except OSError:
-                print("Error: An error occurred while attempting to overwrite dest folder.")
+                self.log.error("An error occurred while attempting to overwrite dest folder.")
                 sys.exit(1)
             dest_exists = False
 
         if not dest_exists:
             if self.settings.can_create_dir:
-                print(f"* Creating output directory {dest_folder}")
+                self.log.info("Creating output directory %s", dest_folder)
                 try:
                     os.makedirs(dest_folder)
                 except OSError:
-                    print("Error: An error occurred while creating dest folder.")
+                    self.log.error("An error occurred while creating dest folder.")
                     sys.exit(1)
             else:
-                print("Error: Dest folder does not exist. Create it or pass the appropriate flag for automatic dest dir creation.")
+                self.log.error("Dest folder does not exist. Create it or pass the appropriate flag for automatic dest dir creation.")
                 sys.exit(1)
 
 
@@ -643,7 +697,7 @@ class DylibBundler:
             self.collect_dependencies(file_to_fix)
             print()
 
-        print(f"  * Fixing dependencies on {file_to_fix}")
+        self.log.info("Fixing dependencies on %s", file_to_fix)
         deps_in_file = self.deps_per_file.get(file_to_fix, [])
         for dep in deps_in_file:
             dep.fix_file_that_depends_on_me(file_to_fix)
@@ -656,7 +710,7 @@ class DylibBundler:
         for rpath in rpaths_to_fix:
             command = f'install_name_tool -rpath "{rpath}" "{self.settings.inside_lib_path}" "{file_to_fix}"'
             if subprocess.call(command, shell=True) != 0:
-                print(f"Error: An error occurred while trying to fix dependencies of {file_to_fix}")
+                self.log.error("An error occurred while trying to fix dependencies of %s", file_to_fix)
 
 
     def adhoc_codesign(self, file: str) -> None:
@@ -666,9 +720,7 @@ class DylibBundler:
 
         sign_command = f'codesign --force --deep --preserve-metadata=entitlements,requirements,flags,runtime --sign - "{file}"'
         if subprocess.call(sign_command, shell=True) != 0:
-            print(
-                f"  * Error: An error occurred while applying ad-hoc signature to {file}. Attempting workaround"
-            )
+            self.log.error("An error occurred while applying ad-hoc signature to %s. Attempting workaround", file)
 
             try:
                 machine = subprocess.check_output("machine", shell=True, text=True)
@@ -690,13 +742,11 @@ class DylibBundler:
                 shutil.rmtree(temp_dir)
                 # Try signing again
                 if subprocess.call(sign_command, shell=True) != 0:
-                    print(
-                        f"  * Error: An error occurred while applying ad-hoc signature to {file}"
-                    )
+                    self.log.error("An error occurred while applying ad-hoc signature to %s", file)
                     if is_arm:
                         sys.exit(1)
             except Exception as e:
-                print(f"  * Error: {str(e)}")
+                self.log.error(" %s", str(e))
                 if is_arm:
                     sys.exit(1)
 
@@ -706,9 +756,9 @@ class DylibBundler:
         settings = Settings()
 
         parser = argparse.ArgumentParser(
-                    prog='bundler',
-                    description='bundler is a utility that helps bundle dynamic libraries inside macOS app bundles.',
-                    epilog=("e.g: bundler -od -b -x ./Demo.app/Contents/MacOS/demo -d ./Demo.app/Contents/libs/"))
+            prog='bundler',
+            description='bundler is a utility that helps bundle dynamic libraries inside macOS app bundles.',
+            epilog=("e.g: bundler -od -b -x ./Demo.app/Contents/MacOS/demo -d ./Demo.app/Contents/libs/"))
 
         opt = parser.add_argument
 
@@ -753,7 +803,8 @@ class DylibBundler:
         # create instance
         bundler = cls(settings)
 
-        print("* Collecting dependencies", end="", flush=True)
+        # print("* Collecting dependencies", end="", flush=True)
+        bundler.log.info("Collecting dependencies")
 
         # Collect dependencies
         for i in range(bundler.settings.file_to_fix_amount):
