@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """bundler is a utility that helps bundle dynamic libraries inside macOS app bundles.
 
-It is a python3 translation of a cpp utility by Marianne Gagnon called macdylibbundler
+It is a python3 translation of the cpp macdylibbundler utility by Marianne Gagnon 
 which can be found at https://github.com/auriamg/macdylibbundler
 
-usage: bundler [-h] [-x FIX_FILE] [-b] [-d DEST_DIR] [-p INSTALL_PATH]
-               [-s SEARCH_PATH] [-of] [-od] [-cd] [-ns] [-i IGNORE]
+usage: bundler [-h] [-b] [-d DEST_DIR] [-p INSTALL_PATH] [-s SEARCH_PATH] [-of]
+               [-od] [-cd] [-ns] [-i IGNORE]
+               target [target ...]
 
 bundler is a utility that helps bundle dynamic libraries inside macOS app
 bundles.
 
+positional arguments:
+  target                file to fix (executable or app plug-in)
+
 options:
   -h, --help            show this help message and exit
-  -x, --fix-file FIX_FILE
-                        file to fix (executable or app plug-in)
   -b, --bundle-deps     bundle dependencies
   -d, --dest-dir DEST_DIR
                         directory to send bundled libraries (relative to cwd)
@@ -24,13 +26,13 @@ options:
                         directory to add to list of locations searched
   -of, --overwrite-files
                         allow overwriting files in output directory
-  -od, --overwrite-dir  totally overwrite output directory if it already
-                        exists. implies --create-dir
+  -od, --overwrite-dir  totally overwrite output directory if it already exists.
+                        implies --create-dir
   -cd, --create-dir     creates output directory if necessary
   -ns, --no-codesign    disables ad-hoc codesigning
   -i, --ignore IGNORE   will ignore libraries in this directory
 
-e.g: bundler -od -b -x ./My.app/Contents/MacOS/demo -d ./My.app/Contents/libs/
+e.g: bundler -od -b -d My.app/Contents/libs/ My.app/Contents/MacOS/main
 """
 
 import argparse
@@ -103,11 +105,11 @@ class CustomFormatter(logging.Formatter):
         return formatter.format(record)
 
 # Configure logging
-strm_handler = logging.StreamHandler()
-strm_handler.setFormatter(CustomFormatter())
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(CustomFormatter())
 logging.basicConfig(
     level=logging.DEBUG if DEBUG else logging.INFO,
-    handlers=[strm_handler],
+    handlers=[stream_handler],
 )
 
 # ----------------------------------------------------------------------------
@@ -714,12 +716,12 @@ class DylibBundler:
         parser = argparse.ArgumentParser(
             prog='bundler',
             description='bundler is a utility that helps bundle dynamic libraries inside macOS app bundles.',
-            epilog="e.g: bundler -od -b -x ./My.app/Contents/MacOS/demo -d ./My.app/Contents/libs/",
+            epilog="e.g: bundler -od -b -d My.app/Contents/libs/ My.app/Contents/MacOS/main",
         )
 
-        opt = parser.add_argument
+        arg = opt = parser.add_argument
 
-        opt("-x", "--fix-file", help="file to fix (executable or app plug-in)")
+        arg("target", nargs="+", help="file to fix (executable or app plug-in)")
         opt("-b", "--bundle-deps", help="bundle dependencies", action="store_true")
         opt("-d", "--dest-dir", help="directory to send bundled libraries (relative to cwd)")
         opt("-p", "--install-path", default="@executable_path/../libs/", help="'inner' path of bundled libraries (usually relative to executable")
@@ -731,8 +733,8 @@ class DylibBundler:
         opt("-i", "--ignore", help="will ignore libraries in this directory")
 
         args = parser.parse_args()
-        if args.fix_file:
-            settings.add_file_to_fix(args.fix_file)
+        for target in args.target:
+            settings.add_file_to_fix(target)
         if args.bundle_deps:
             settings.bundle_libs = True
         if args.install_path:
