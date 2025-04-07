@@ -73,15 +73,16 @@ class CustomFormatter(logging.Formatter):
         logging.CRITICAL: cfmt.format(bold_red, reset),
     }
 
-    def __init__(self, use_color=COLOR):
+    def __init__(self, use_color: bool = COLOR):
         self.use_color = use_color
 
-    def format(self, record):
+    def format(self, record: logging.LogRecord) -> str:
         """custom logger formatting method"""
         if not self.use_color:
             log_fmt = self.fmt
         else:
-            log_fmt = self.FORMATS.get(record.levelno)
+            # log_fmt = self.FORMATS.get(record.levelno)
+            log_fmt = self.FORMATS[record.levelno]
             duration = datetime.datetime.fromtimestamp(
                 record.relativeCreated / 1000, datetime.UTC
             )
@@ -96,6 +97,7 @@ logging.basicConfig(
     level=logging.DEBUG if DEBUG else logging.INFO,
     handlers=[strm_handler],
 )
+
 
 # ----------------------------------------------------------------------------
 # classes
@@ -129,25 +131,16 @@ class Settings:
         prefixes_to_ignore: Optional[list[str]] = None,
         search_paths: Optional[list[str]] = None,
     ):
-        self.dest_dir = self.ensure_endswith_slash(dest_dir)
-        self.overwrite_files = overwrite_files
-        self.overwrite_dir = overwrite_dir
-        self.create_dir = create_dir
-        self.codesign = codesign
-        self.bundle_libs = bundle_libs
-        self.inside_lib_path = self.ensure_endswith_slash(inside_lib_path)
-        self.files_to_fix = files_to_fix or []
-        self.prefixes_to_ignore = prefixes_to_ignore or []
-        self.search_paths = search_paths or []
-
-    create_dir: bool = False
-    codesign: bool = True
-    bundle_libs: bool = False
-    dest_folder: str = "./libs/"
-    inside_lib_path: str = "@executable_path/../libs/"
-    files_to_fix: list[str] = []
-    prefixes_to_ignore: list[str] = []
-    search_paths: list[str] = []
+        self.dest_dir: str = self.ensure_endswith_slash(dest_dir)
+        self.overwrite_files: bool = overwrite_files
+        self.overwrite_dir: bool = overwrite_dir
+        self.create_dir: bool = create_dir
+        self.codesign: bool = codesign
+        self.bundle_libs: bool = bundle_libs
+        self.inside_lib_path: str = self.ensure_endswith_slash(inside_lib_path)
+        self.files_to_fix: list[str] = files_to_fix or []
+        self.prefixes_to_ignore: list[str] = prefixes_to_ignore or []
+        self.search_paths: list[str] = search_paths or []
 
     @property
     def can_overwrite_files(self) -> bool:
@@ -407,7 +400,7 @@ class Dependency:
 
     def get_install_path(self) -> str:
         """Get the install path."""
-        return self.settings.dest_folder + self.new_name
+        return self.settings.dest_dir + self.new_name
 
     def get_inner_path(self) -> str:
         """Get the inner path."""
@@ -663,15 +656,15 @@ class DylibBundler:
 
     def create_dest_dir(self) -> None:
         """Create the destination directory if needed."""
-        dest_folder = self.settings.dest_folder
-        self.log.info("Checking output directory %s", dest_folder)
+        dest_dir = self.settings.dest_dir
+        self.log.info("Checking output directory %s", dest_dir)
 
-        dest_exists = os.path.exists(dest_folder)
+        dest_exists = os.path.exists(dest_dir)
 
         if dest_exists and self.settings.can_overwrite_dir:
-            self.log.info("Erasing old output directory %s", dest_folder)
+            self.log.info("Erasing old output directory %s", dest_dir)
             try:
-                shutil.rmtree(dest_folder)
+                shutil.rmtree(dest_dir)
             except OSError:
                 self.log.error("An error occurred while attempting to overwrite dest folder.")
                 sys.exit(1)
@@ -679,9 +672,9 @@ class DylibBundler:
 
         if not dest_exists:
             if self.settings.can_create_dir:
-                self.log.info("Creating output directory %s", dest_folder)
+                self.log.info("Creating output directory %s", dest_dir)
                 try:
-                    os.makedirs(dest_folder)
+                    os.makedirs(dest_dir)
                 except OSError:
                     self.log.error("An error occurred while creating dest folder.")
                     sys.exit(1)
@@ -783,7 +776,7 @@ class DylibBundler:
         elif args.ignore:
             settings.ignore_prefix(args.ignore)
         elif args.dest_dir:
-            settings.dest_folder = args.dest_dir
+            settings.dest_dir = args.dest_dir
         elif args.overwrite_files:
             settings.overwrite_files = True
         elif args.overwrite_dir:
@@ -856,7 +849,7 @@ class DylibBundler:
     #             self.settings.ignore_prefix(sys.argv[i])
     #         elif arg in ["-d", "--dest-dir"]:
     #             i += 1
-    #             self.settings.dest_folder = sys.argv[i]
+    #             self.settings.dest_dir = sys.argv[i]
     #         elif arg in ["-of", "--overwrite-files"]:
     #             self.settings.overwrite_files = True
     #         elif arg in ["-od", "--overwrite-dir"]:
