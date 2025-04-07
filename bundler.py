@@ -47,7 +47,8 @@ from typing import Optional, List, Dict
 
 DEBUG = True
 COLOR = True
-CAVEAT = "MAY NOT CORRECTLY HANDLE THIS DEPENDENCY: Manually check the executable with 'otool -L'"
+CAVEAT = ("MAY NOT CORRECTLY HANDLE THIS DEPENDENCY: "
+          "Manually check the executable with 'otool -L'")
 
 # type aliases
 Pathlike = str | Path
@@ -58,7 +59,7 @@ Pathlike = str | Path
 class CustomFormatter(logging.Formatter):
     """Custom logging formatting class with color support."""
     
-    class colors:
+    class color:
         white = "\x1b[97;20m"
         grey = "\x1b[38;20m"
         green = "\x1b[32;20m"
@@ -68,14 +69,19 @@ class CustomFormatter(logging.Formatter):
         bold_red = "\x1b[31;1m"
         reset = "\x1b[0m"
     
-    cfmt = f"{colors.white}%(delta)s{colors.reset} - {{}}%(levelname)s{colors.reset} - {colors.white}%(name)s.%(funcName)s{colors.reset} - {colors.grey}%(message)s{colors.reset}"
+    cfmt = (
+        f"{color.white}%(delta)s{color.reset} - "
+        f"{{}}%(levelname)s{color.reset} - "
+        f"{color.white}%(name)s.%(funcName)s{color.reset} - "
+        f"{color.grey}%(message)s{color.reset}"
+    )
 
     FORMATS = {
-        logging.DEBUG: cfmt.format(colors.grey),
-        logging.INFO: cfmt.format(colors.green),
-        logging.WARNING: cfmt.format(colors.yellow),
-        logging.ERROR: cfmt.format(colors.red),
-        logging.CRITICAL: cfmt.format(colors.bold_red),
+        logging.DEBUG: cfmt.format(color.grey),
+        logging.INFO: cfmt.format(color.green),
+        logging.WARNING: cfmt.format(color.yellow),
+        logging.ERROR: cfmt.format(color.red),
+        logging.CRITICAL: cfmt.format(color.bold_red),
     }
 
     def __init__(self, use_color: bool = COLOR):
