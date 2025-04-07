@@ -235,7 +235,7 @@ class Dependency:
         dependent_file = Path(dependent_file)
 
         if self._is_rpath(path):
-            original_file = self._search_filename_in_rpaths(path, dependent_file)
+            original_file = self.search_filename_in_rpaths(path, dependent_file)
         else:
             try:
                 original_file = path.resolve()
@@ -299,52 +299,6 @@ class Dependency:
             self.settings.add_search_path(prefix_path)
             return prefix_path
 
-    def _search_filename_in_rpaths(self, rpath_file: Path, dependent_file: Path) -> Path:
-        """Search for a filename in rpaths."""
-        fullpath = Path()
-        suffix = re.sub(r"^@[a-z_]+path/", "", str(rpath_file))
-
-        def check_path(path: Path) -> bool:
-            """Check if a path is valid."""
-            file_prefix = dependent_file.parent
-            if dependent_file != rpath_file:
-                path_to_check = Path()
-                if "@loader_path" in str(path):
-                    path_to_check = Path(str(path).replace("@loader_path/", str(file_prefix)))
-                elif "@rpath" in str(path):
-                    path_to_check = Path(str(path).replace("@rpath/", str(file_prefix)))
-
-                try:
-                    fullpath = path_to_check.resolve()
-                    self.parent.rpath_to_fullpath[rpath_file] = fullpath
-                    return True
-                except OSError:
-                    return False
-            return False
-
-        if rpath_file in self.parent.rpath_to_fullpath:
-            fullpath = self.parent.rpath_to_fullpath[rpath_file]
-        elif not check_path(rpath_file):
-            for rpath in self.parent.rpaths_per_file[dependent_file]:
-                if check_path(rpath / suffix):
-                    break
-
-            if rpath_file in self.parent.rpath_to_fullpath:
-                fullpath = self.parent.rpath_to_fullpath[rpath_file]
-
-        if not fullpath:
-            for search_path in self.settings.search_paths:
-                if (search_path / suffix).exists():
-                    fullpath = search_path / suffix
-                    break
-
-            if not fullpath:
-                self.log.warning("can't get path for '%s'", rpath_file)
-                fullpath = self._get_user_input_dir_for_file(suffix) / suffix
-                fullpath = fullpath.resolve()
-
-        return fullpath
-
     def _is_rpath(self, path: Path) -> bool:
         """Check if a path is an rpath."""
         return str(path).startswith("@rpath") or str(path).startswith("@loader_path")
@@ -364,6 +318,59 @@ class Dependency:
 
         for path in search_paths:
             self.settings.add_search_path(path)
+
+    def _change_install_name(self, binary_file: Path, old_name: Path | str, new_name: str) -> None:
+        """Change the install name of a file."""
+        command = f'install_name_tool -change "{old_name}" "{new_name}" "{binary_file}"'
+        if subprocess.call(command, shell=True) != 0:
+            self.log.error("An error occurred while trying to fix dependencies of %s", binary_file)
+            sys.exit(1)
+
+    def search_filename_in_rpaths(self, rpath_file: Path, dependent_file: Path) -> Path:
+        """Search for a filename in rpaths."""
+        fullpath = Path()
+        suffix = re.sub(r"^@[a-z_]+path/", "", str(rpath_file))
+
+        def _check_path(path: Path) -> bool:
+            """Check if a path is valid."""
+            file_prefix = dependent_file.parent
+            if dependent_file != rpath_file:
+                path_to_check = Path()
+                if "@loader_path" in str(path):
+                    path_to_check = Path(str(path).replace("@loader_path/", str(file_prefix)))
+                elif "@rpath" in str(path):
+                    path_to_check = Path(str(path).replace("@rpath/", str(file_prefix)))
+
+                try:
+                    fullpath = path_to_check.resolve()
+                    self.parent.rpath_to_fullpath[rpath_file] = fullpath
+                    return True
+                except OSError:
+                    return False
+            return False
+
+        if rpath_file in self.parent.rpath_to_fullpath:
+            fullpath = self.parent.rpath_to_fullpath[rpath_file]
+        elif not _check_path(rpath_file):
+            for rpath in self.parent.rpaths_per_file[dependent_file]:
+                if _check_path(rpath / suffix):
+                    break
+
+            if rpath_file in self.parent.rpath_to_fullpath:
+                fullpath = self.parent.rpath_to_fullpath[rpath_file]
+
+        if not fullpath:
+            for search_path in self.settings.search_paths:
+                if (search_path / suffix).exists():
+                    fullpath = search_path / suffix
+                    break
+
+            if not fullpath:
+                self.log.warning("can't get path for '%s'", rpath_file)
+                fullpath = self._get_user_input_dir_for_file(suffix) / suffix
+                fullpath = fullpath.resolve()
+
+        return fullpath
 
     def get_original_filename(self) -> str:
         """Get the original filename."""
@@ -414,13 +421,6 @@ class Dependency:
         # Fix symlinks
         for symlink in self.symlinks:
             self._change_install_name(file_to_fix, symlink, self.get_inner_path())
-
-    def _change_install_name(self, binary_file: Path, old_name: Path | str, new_name: str) -> None:
-        """Change the install name of a file."""
-        command = f'install_name_tool -change "{old_name}" "{new_name}" "{binary_file}"'
-        if subprocess.call(command, shell=True) != 0:
-            self.log.error("An error occurred while trying to fix dependencies of %s", binary_file)
-            sys.exit(1)
 
     def merge_if_same_as(self, dep2: "Dependency") -> bool:
         """Compares this dependency with another. If both refer to the same file,
@@ -583,7 +583,7 @@ class DylibBundler:
                 print(".", end="", flush=True)
                 original_path = dep.get_original_path()
                 if dep._is_rpath(original_path):
-                    original_path = dep._search_filename_in_rpaths(
+                    original_path = dep.search_filename_in_rpaths(
                         original_path, original_path
                     )
 
