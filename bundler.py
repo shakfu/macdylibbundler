@@ -58,8 +58,9 @@ Pathlike = str | Path
 
 class CustomFormatter(logging.Formatter):
     """Custom logging formatting class with color support."""
-    
+
     class color:
+        """text colors"""
         white = "\x1b[97;20m"
         grey = "\x1b[38;20m"
         green = "\x1b[32;20m"
@@ -68,7 +69,7 @@ class CustomFormatter(logging.Formatter):
         red = "\x1b[31;20m"
         bold_red = "\x1b[31;1m"
         reset = "\x1b[0m"
-    
+
     cfmt = (
         f"{color.white}%(delta)s{color.reset} - "
         f"{{}}%(levelname)s{color.reset} - "
@@ -94,9 +95,9 @@ class CustomFormatter(logging.Formatter):
             log_fmt = self.fmt
         else:
             log_fmt = self.FORMATS[record.levelno]
-            duration = datetime.datetime.fromtimestamp(
-                record.relativeCreated / 1000, datetime.UTC
-            )
+        duration = datetime.datetime.fromtimestamp(
+            record.relativeCreated / 1000, datetime.UTC
+        )
         record.delta = duration.strftime("%H:%M:%S")
         formatter = logging.Formatter(log_fmt)
         return formatter.format(record)
@@ -713,7 +714,8 @@ class DylibBundler:
         parser = argparse.ArgumentParser(
             prog='bundler',
             description='bundler is a utility that helps bundle dynamic libraries inside macOS app bundles.',
-            epilog=("e.g: bundler -od -b -x ./My.app/Contents/MacOS/demo -d ./My.app/Contents/libs/"))
+            epilog="e.g: bundler -od -b -x ./My.app/Contents/MacOS/demo -d ./My.app/Contents/libs/",
+        )
 
         opt = parser.add_argument
 
@@ -769,4 +771,3 @@ class DylibBundler:
 
 if __name__ == "__main__":
     DylibBundler.commandline()
-
