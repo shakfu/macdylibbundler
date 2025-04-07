@@ -769,24 +769,24 @@ class DylibBundler:
         args = parser.parse_args()
         if args.fix_file:
             settings.add_file_to_fix(args.fix_file)
-        elif args.bundle_deps:
+        if args.bundle_deps:
             settings.bundle_libs = True
-        elif args.install_path:
+        if args.install_path:
             settings.inside_lib_path = args.install_path
-        elif args.ignore:
+        if args.ignore:
             settings.ignore_prefix(args.ignore)
-        elif args.dest_dir:
+        if args.dest_dir:
             settings.dest_dir = args.dest_dir
-        elif args.overwrite_files:
+        if args.overwrite_files:
             settings.overwrite_files = True
-        elif args.overwrite_dir:
+        if args.overwrite_dir:
             settings.overwrite_dir = True
             settings.create_dir = True
-        elif args.create_dir:
+        if args.create_dir:
             settings.create_dir = True
-        elif args.no_codesign:
+        if args.no_codesign:
             settings.codesign = False
-        elif args.search_path:
+        if args.search_path:
             settings.add_search_path(args.search_path)
 
         if not settings.bundle_libs_enabled and (settings.file_to_fix_amount < 1):
