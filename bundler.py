@@ -4,19 +4,17 @@
 It is a python3 translation of the cpp macdylibbundler utility by Marianne Gagnon 
 which can be found at https://github.com/auriamg/macdylibbundler
 
-usage: bundler [-h] [-b] [-d DEST_DIR] [-p INSTALL_PATH] [-s SEARCH_PATH] [-of]
-               [-od] [-cd] [-ns] [-i IGNORE]
+usage: bundler [-h] [-d DEST_DIR] [-p INSTALL_PATH] [-s SEARCH_PATH] [-od] [-cd]
+               [-ns] [-i IGNORE]
                target [target ...]
 
-bundler is a utility that helps bundle dynamic libraries inside macOS app
-bundles.
+bundler is a utility that helps bundle dynamic libraries inside macOS app bundles.
 
 positional arguments:
   target                file to fix (executable or app plug-in)
 
 options:
   -h, --help            show this help message and exit
-  -b, --bundle-deps     bundle dependencies
   -d, --dest-dir DEST_DIR
                         directory to send bundled libraries (relative to cwd)
   -p, --install-path INSTALL_PATH
@@ -24,8 +22,6 @@ options:
                         executable
   -s, --search-path SEARCH_PATH
                         directory to add to list of locations searched
-  -of, --overwrite-files
-                        allow overwriting files in output directory
   -od, --overwrite-dir  totally overwrite output directory if it already exists.
                         implies --create-dir
   -cd, --create-dir     creates output directory if necessary
@@ -147,7 +143,7 @@ class Dependency:
         self.prefix = original_file.parent
 
         # Check if this dependency should be bundled
-        if not self.parent.is_prefix_bundled(self.prefix):
+        if not self.parent.is_bundled_prefix(self.prefix):
             return
 
         # Check if the lib is in a known location
@@ -163,7 +159,7 @@ class Dependency:
                     break
 
         # If location still unknown, ask user for search path
-        if not self.parent.is_prefix_ignored(self.prefix) and (
+        if not self.parent.is_ignored_prefix(self.prefix) and (
             not self.prefix or not (self.prefix / self.filename).exists()
         ):
             self.log.warning("Library %s has an incomplete name (location unknown)", self.filename)
@@ -268,10 +264,6 @@ class Dependency:
 
         return fullpath
 
-    def get_original_filename(self) -> str:
-        """Get the original filename."""
-        return self.filename
-
     def get_original_path(self) -> Path:
         """Get the original path."""
         return self.prefix / self.filename
@@ -288,10 +280,6 @@ class Dependency:
         """Add a symlink."""
         if symlink not in self.symlinks:
             self.symlinks.append(symlink)
-
-    def get_n_symlinks(self) -> int:
-        """Get the number of symlinks."""
-        return len(self.symlinks)
 
     def get_symlink(self, index: int) -> Path:
         """Get a symlink by index."""
@@ -321,17 +309,18 @@ class Dependency:
     def merge_if_same_as(self, dep2: "Dependency") -> bool:
         """Compares this dependency with another. If both refer to the same file,
         returns true and merges both entries into one."""
-        if dep2.get_original_filename() == self.filename:
-            for i in range(self.get_n_symlinks()):
-                dep2.add_symlink(self.get_symlink(i))
+        if dep2.filename == self.filename:
+            for symlink in self.symlinks:
+                dep2.add_symlink(symlink)
             return True
         return False
 
     def print(self) -> None:
         """Print the dependency."""
-        self.log.info(f"{self.filename} from {self.prefix}")
+        lines = [f"{self.filename} from {self.prefix}"]
         for sym in self.symlinks:
-            self.log.info(f"    symlink --> {sym}")
+            lines.append(f"    symlink --> {sym}")
+        self.log.info("\n".join(lines))
 
 
 class DylibBundler:
@@ -364,11 +353,6 @@ class DylibBundler:
         self.rpath_to_fullpath: Dict[Path, Path] = {}
         self.log = logging.getLogger(self.__class__.__name__)
 
-    @property
-    def n_files_to_fix(self) -> int:
-        """The number of files to fix."""
-        return len(self.files_to_fix)
-
     def add_search_path(self, path: Pathlike) -> None:
         """Add a search path."""
         self.search_paths.append(Path(path))
@@ -381,10 +365,6 @@ class DylibBundler:
         """Add a file to fix."""
         self.files_to_fix.append(Path(path))
 
-    def file_to_fix(self, index: int) -> Path:
-        """Get a file to fix by index."""
-        return self.files_to_fix[index]
-
     def ignore_prefix(self, prefix: Pathlike) -> None:
         """Ignore a prefix."""
         self.prefixes_to_ignore.append(Path(prefix))
@@ -394,11 +374,11 @@ class DylibBundler:
         prefix = str(prefix)
         return prefix.startswith("/usr/lib/") or prefix.startswith("/System/Library/")
 
-    def is_prefix_ignored(self, prefix: Pathlike) -> bool:
+    def is_ignored_prefix(self, prefix: Pathlike) -> bool:
         """Check if a prefix is ignored."""
         return Path(prefix) in self.prefixes_to_ignore
 
-    def is_prefix_bundled(self, prefix: Pathlike) -> bool:
+    def is_bundled_prefix(self, prefix: Pathlike) -> bool:
         """Check if a prefix is bundled."""
         prefix = str(prefix)
         if ".framework" in prefix:
@@ -407,9 +387,14 @@ class DylibBundler:
             return False
         if self.is_system_library(prefix):
             return False
-        if self.is_prefix_ignored(prefix):
+        if self.is_ignored_prefix(prefix):
             return False
         return True
+
+    def chmod(self, path, perm=0o777):
+        """Change permission of file"""
+        self.log.info("change permission of %s to %s", path, perm)
+        os.chmod(path, perm)
 
     def collect_dependencies(self, filename: Path) -> None:
         """Collect dependencies for a given file."""
@@ -525,7 +510,7 @@ class DylibBundler:
                 in_deps_per_file = True
                 break
 
-        if not self.is_prefix_bundled(dep.prefix):
+        if not self.is_bundled_prefix(dep.prefix):
             return
 
         if not in_deps:
@@ -569,16 +554,15 @@ class DylibBundler:
             self.fix_rpaths_on_file(dep.get_original_path(), dep.get_install_path())
             self.adhoc_codesign(dep.get_install_path())
 
-        for i in range(self.n_files_to_fix - 1, -1, -1):
-            file_to_fix = self.file_to_fix(i)
-            self.log.info("Processing %s", file_to_fix)
-            try:
-                shutil.copy2(file_to_fix, file_to_fix)  # to set write permission
-            except shutil.SameFileError:
-                pass
-            self.change_lib_paths_on_file(file_to_fix)
-            self.fix_rpaths_on_file(file_to_fix, file_to_fix)
-            self.adhoc_codesign(file_to_fix)
+        for file in reversed(self.files_to_fix):
+            self.log.info("Processing %s", file)
+            # try:
+            #     shutil.copy2(file, file)  # to set write permission
+            # except shutil.SameFileError:
+            #     pass
+            self.change_lib_paths_on_file(file)
+            self.fix_rpaths_on_file(file, file)
+            self.adhoc_codesign(file)
 
     def create_dest_dir(self) -> None:
         """Create the destination directory if needed."""
@@ -634,6 +618,7 @@ class DylibBundler:
         if not self.can_codesign:
             return
 
+        self.log.info("codesign %s", file);
         sign_command = f'codesign --force --deep --preserve-metadata=entitlements,requirements,flags,runtime --sign - "{file}"'
         if subprocess.call(sign_command, shell=True) != 0:
             self.log.error("An error occurred while applying ad-hoc signature to %s. Attempting workaround", file)
@@ -684,7 +669,7 @@ class DylibBundler:
         opt("-s", "--search-path", help="directory to add to list of locations searched")
         opt("-od", "--overwrite-dir", help="totally overwrite output directory if it already exists. implies --create-dir", action="store_true")
         opt("-cd", "--create-dir", help="creates output directory if necessary", action="store_true")
-        opt("-ns", "--no-codesign", help="disables ad-hoc codesigning", action="store_true")
+        opt("-ns", "--no-codesign", help="disables ad-hoc codesigning", action="store_false")
         opt("-i", "--ignore", help="will ignore libraries in this directory")
 
         args = parser.parse_args()
@@ -692,7 +677,7 @@ class DylibBundler:
             dest_dir = Path(args.dest_dir),
             overwrite_dir = args.overwrite_dir,
             create_dir = args.create_dir or args.overwrite_dir,
-            codesign = not args.no_codesign,
+            codesign = args.no_codesign,
             inside_lib_path =  args.install_path,
             files_to_fix = [Path(f) for f in args.target],
             prefixes_to_ignore = [Path(args.ignore)] if args.ignore else [],
@@ -702,8 +687,8 @@ class DylibBundler:
         bundler.log.info("Collecting dependencies")
 
         # Collect dependencies
-        for i in range(bundler.n_files_to_fix):
-            bundler.collect_dependencies(bundler.file_to_fix(i))
+        for file in bundler.files_to_fix:
+            bundler.collect_dependencies(file)
 
         bundler.collect_sub_dependencies()
         bundler.done_with_deps_go()
