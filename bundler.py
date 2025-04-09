@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """bundler is a utility that helps bundle dynamic libraries inside macOS app bundles.
 
-It is a python3 translation of the c++ macdylibbundler utility by Marianne Gagnon 
+It is a python3 translation of the c++ macdylibbundler utility by Marianne Gagnon
 which can be found at https://github.com/auriamg/macdylibbundler
 
 usage: bundler [-h] [-d DEST_DIR] [-p INSTALL_PATH] [-s SEARCH_PATH] [-od]
@@ -46,7 +46,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Optional, List, Dict, NoReturn
+from typing import Dict, List, Optional
 
 CAVEAT = ("MAY NOT CORRECTLY HANDLE THIS DEPENDENCY: "
           "Manually check the executable with 'otool -L'")
@@ -128,7 +128,7 @@ class CustomFormatter(logging.Formatter):
 
 def setup_logging(debug: bool = True, use_color: bool = True) -> None:
     """Configure logging for the application.
-    
+
     Args:
         debug: Whether to enable debug logging
         use_color: Whether to use colored output
@@ -148,12 +148,12 @@ class Dependency:
 
     def __init__(self, parent: "DylibBundler", path: Pathlike, dependent_file: Pathlike):
         """Initialize a new dependency.
-        
+
         Args:
             parent: The parent DylibBundler instance
             path: The path to the dependency
             dependent_file: The file that depends on this dependency
-            
+
         Raises:
             FileError: If the dependency cannot be resolved
             ConfigurationError: If the dependency configuration is invalid
@@ -217,13 +217,13 @@ class Dependency:
 
     def _get_user_input_dir_for_file(self, filename: str) -> Path:
         """Get a user input directory for a file.
-        
+
         Args:
             filename: The name of the file to find
-            
+
         Returns:
             The directory containing the file
-            
+
         Raises:
             ConfigurationError: If no valid directory is provided
         """
@@ -251,10 +251,10 @@ class Dependency:
 
     def _is_rpath(self, path: Path) -> bool:
         """Check if a path is an rpath.
-        
+
         Args:
             path: The path to check
-            
+
         Returns:
             True if the path is an rpath, False otherwise
         """
@@ -278,12 +278,12 @@ class Dependency:
 
     def _change_install_name(self, binary_file: Path, old_name: Pathlike, new_name: str) -> None:
         """Change the install name of a file.
-        
+
         Args:
             binary_file: The file to modify
             old_name: The old install name
             new_name: The new install name
-            
+
         Raises:
             CommandError: If the install_name_tool command fails
         """
@@ -297,51 +297,97 @@ class Dependency:
                 e.output
             )
 
-    def search_filename_in_rpaths(self, rpath_file: Path, dependent_file: Path) -> Path:
-        """Search for a filename in rpaths."""
-        fullpath = Path()
+    def _resolve_rpath(self, rpath: Path, file_prefix: Path) -> Optional[Path]:
+        """Resolve a single rpath to its full path.
+
+        Args:
+            rpath: The rpath to resolve
+            file_prefix: The prefix path for @loader_path resolution
+
+        Returns:
+            The resolved path if successful, None otherwise
+        """
+        path_to_check = Path()
+        if "@loader_path" in str(rpath):
+            path_to_check = Path(str(rpath).replace("@loader_path/", str(file_prefix)))
+        elif "@rpath" in str(rpath):
+            path_to_check = Path(str(rpath).replace("@rpath/", str(file_prefix)))
+
+        try:
+            fullpath = path_to_check.resolve()
+            self.parent.rpath_to_fullpath[rpath] = fullpath
+            return fullpath
+        except OSError:
+            return None
+
+    def _search_in_rpaths(self, rpath_file: Path, dependent_file: Path) -> Optional[Path]:
+        """Search for a file in rpaths.
+
+        Args:
+            rpath_file: The rpath file to search for
+            dependent_file: The file that depends on the rpath
+
+        Returns:
+            The resolved path if found, None otherwise
+        """
+        file_prefix = dependent_file.parent
         suffix = re.sub(r"^@[a-z_]+path/", "", str(rpath_file))
 
-        def _check_path(path: Path) -> bool:
-            """Check if a path is valid."""
-            file_prefix = dependent_file.parent
-            if dependent_file != rpath_file:
-                path_to_check = Path()
-                if "@loader_path" in str(path):
-                    path_to_check = Path(str(path).replace("@loader_path/", str(file_prefix)))
-                elif "@rpath" in str(path):
-                    path_to_check = Path(str(path).replace("@rpath/", str(file_prefix)))
-
-                try:
-                    fullpath = path_to_check.resolve()
-                    self.parent.rpath_to_fullpath[rpath_file] = fullpath
-                    return True
-                except OSError:
-                    return False
-            return False
-
+        # Check if already resolved
         if rpath_file in self.parent.rpath_to_fullpath:
-            fullpath = self.parent.rpath_to_fullpath[rpath_file]
-        elif not _check_path(rpath_file):
-            for rpath in self.parent.rpaths_per_file[dependent_file]:
-                if _check_path(rpath / suffix):
-                    break
+            return self.parent.rpath_to_fullpath[rpath_file]
 
-            if rpath_file in self.parent.rpath_to_fullpath:
-                fullpath = self.parent.rpath_to_fullpath[rpath_file]
+        # Try to resolve directly
+        if self._resolve_rpath(rpath_file, file_prefix):
+            return self.parent.rpath_to_fullpath[rpath_file]
 
-        if not fullpath:
-            for search_path in self.parent.search_paths:
-                if (search_path / suffix).exists():
-                    fullpath = search_path / suffix
-                    break
+        # Try all rpaths for the dependent file
+        for rpath in self.parent.rpaths_per_file[dependent_file]:
+            if self._resolve_rpath(rpath / suffix, file_prefix):
+                return self.parent.rpath_to_fullpath[rpath_file]
 
-            if not fullpath:
-                self.log.warning("can't get path for '%s'", rpath_file)
-                fullpath = self._get_user_input_dir_for_file(suffix) / suffix
-                fullpath = fullpath.resolve()
+        return None
 
-        return fullpath
+    def _search_in_search_paths(self, suffix: str) -> Optional[Path]:
+        """Search for a file in configured search paths.
+
+        Args:
+            suffix: The file suffix to search for
+
+        Returns:
+            The path if found, None otherwise
+        """
+        for search_path in self.parent.search_paths:
+            if (search_path / suffix).exists():
+                return search_path / suffix
+        return None
+
+    def search_filename_in_rpaths(self, rpath_file: Path, dependent_file: Path) -> Path:
+        """Search for a filename in rpaths.
+
+        Args:
+            rpath_file: The rpath file to search for
+            dependent_file: The file that depends on the rpath
+
+        Returns:
+            The resolved path to the file
+        """
+        suffix = re.sub(r"^@[a-z_]+path/", "", str(rpath_file))
+
+        # Try to find in rpaths
+        fullpath = self._search_in_rpaths(rpath_file, dependent_file)
+        if fullpath:
+            return fullpath
+
+        # Try to find in search paths
+        fullpath = self._search_in_search_paths(suffix)
+        if fullpath:
+            return fullpath
+
+        # If not found, ask user for help
+        self.log.warning("can't get path for '%s'", rpath_file)
+        fullpath = self._get_user_input_dir_for_file(suffix) / suffix
+        return fullpath.resolve()
 
     def get_original_path(self) -> Path:
         """Get the original path."""
@@ -417,7 +463,7 @@ class DylibBundler:
         search_paths: Optional[List[Pathlike]] = None,
     ):
         """Initialize a new DylibBundler instance.
-        
+
         Args:
             dest_dir: Directory to send bundled libraries
             overwrite_dir: Whether to overwrite existing output directory
@@ -427,7 +473,7 @@ class DylibBundler:
             files_to_fix: List of files to process
             prefixes_to_ignore: List of prefixes to ignore
             search_paths: List of search paths
-            
+
         Raises:
             ConfigurationError: If configuration is invalid
         """
@@ -497,14 +543,14 @@ class DylibBundler:
 
     def run_command(self, command: str, shell: bool = True) -> str:
         """Run a shell command and return its output.
-        
+
         Args:
             command: The command to run
             shell: Whether to run in a shell
-            
+
         Returns:
             The command output
-            
+
         Raises:
             CommandError: If the command fails
         """
@@ -521,7 +567,7 @@ class DylibBundler:
         except subprocess.CalledProcessError as e:
             raise CommandError(command, e.returncode, e.output)
 
-    def chmod(self, path, perm=0o777):
+    def chmod(self, path: Pathlike, perm: int = 0o777) -> None:
         """Change permission of file"""
         self.log.info("change permission of %s to %s", path, perm)
         os.chmod(path, perm)
@@ -689,7 +735,7 @@ class DylibBundler:
 
     def create_dest_dir(self) -> None:
         """Create the destination directory if needed.
-        
+
         Raises:
             FileError: if directory creation fails
         """
@@ -737,10 +783,10 @@ class DylibBundler:
 
     def adhoc_codesign(self, file: Path) -> None:
         """Apply ad-hoc code signing to a file.
-        
+
         Args:
             file: The file to sign
-            
+
         Raises:
             CommandError: If codesigning fails
         """
@@ -749,10 +795,10 @@ class DylibBundler:
 
         self.log.info("codesign %s", file)
         sign_command = f'codesign --force --deep --preserve-metadata=entitlements,requirements,flags,runtime --sign - "{file}"'
-        
+
         try:
             self.run_command(sign_command)
-        except CommandError as e:
+        except CommandError:
             self.log.error("An error occurred while applying ad-hoc signature to %s. Attempting workaround", file)
 
             try:
@@ -808,7 +854,7 @@ class DylibBundler:
             opt("-nc", "--no-color", help="disable color in logging", action="store_true")
 
             args = parser.parse_args()
-            
+
             # Setup logging
             setup_logging(args.debug_mode, not args.no_color)
 
